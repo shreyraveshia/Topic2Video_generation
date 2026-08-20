@@ -132,12 +132,7 @@ padded (not stretched) to exactly 1080×1920.
 The assignment notes that "most video models emit clips of only a few
 seconds." Real AI video generation (image-to-video, via Hugging Face's
 Inference Providers / fal-ai) was investigated as the primary motion
-mechanism. Testing surfaced two real findings:
-- `Lightricks/LTX-Video` is not supported by the `fal-ai` provider for this
-  task (`ValueError: Model ... is not supported by provider fal-ai`).
-- Other image-to-video models (e.g. `Wan-AI/Wan2.2-I2V-A14B`) do appear to
-  have provider support based on their published usage examples, but this
-  was not fully verified given time constraints.
+mechanism.
 
 Given the 2-day timeline and free-tier-only constraint, Ken Burns motion was
 adopted as the **sole, reliable** motion mechanism for the submission,
