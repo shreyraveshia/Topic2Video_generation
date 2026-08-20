@@ -3,23 +3,12 @@
 pipeline_stages.py
 ===================
 
-SESSION 2 (dummy version) -- placeholder implementations of our 4 stages.
-Real logic gets swapped in over the next sessions.
-
 Each function below stands in for one real pipeline stage:
 
     gather_info        -> Task 1: research topic OR scrape URL / transcript
     generate_storyboard -> Task 2: LLM turns raw content into scenes
     generate_assets     -> Task 3: images + narration audio per scene
     assemble_video       -> Task 4: FFmpeg stitches everything into the final mp4
-
-Right now they just sleep briefly and return fake data, so we can verify
-the orchestrator (caching, retries, state-passing) works correctly in
-isolation. In later sessions we replace the BODY of each function with
-real logic -- the function signature (dict in, dict out) and the fact that
-each is registered via `@task(...)` does not need to change. This is the
-"swap the implementation without touching the pipeline" property the
-assignment asks for.
 """
 
 from pathlib import Path
