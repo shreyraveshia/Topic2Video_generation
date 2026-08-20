@@ -1,4 +1,10 @@
-# Add project dependencies here, one per line.
-# Example:
-# openai
-# moviepy
+groq
+python-dotenv
+trafilatura
+youtube-transcript-api
+requests
+edge-tts
+mutagen
+moviepy
+numpy
+Pillow

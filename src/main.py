@@ -21,6 +21,7 @@ pipeline_stages.py; this file stays thin on purpose.
 
 import argparse
 import sys
+from typing import final
 
 # argparse is Python's built-in tool for reading command-line arguments 
 # — it's what lets you type --input "..." when running the script and have Python parse that cleanly
@@ -88,7 +89,7 @@ def main(): # This is the main application function.
 
 # # Get final result
     final = results["assembly"].output
-    print(f"\nFinal video: {final['final_video_path']} ({final['num_scenes']} scenes)")
+    print(f"\nFinal video: {final['final_video_path']} ({final['duration_s']}s)")
 
 
     # results["assembly"]` gives: TaskResult(...)
@@ -114,7 +115,7 @@ So output might look like:
 
 ''' What happens inside `pipeline.run()`?
 
-This is the complete execution:
+This is the complete  execution:
 
 main.py
    │

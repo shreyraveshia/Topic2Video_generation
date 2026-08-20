@@ -55,7 +55,7 @@ def _research_topic(topic: str) -> str:
     (no source material was provided by the user).
     """
     response = _groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",   # llama-3.3-70b-versatile -> got deprecieted recently
         messages=[
             {
                 "role": "system",  
@@ -491,9 +491,10 @@ Step 2 - Storyboard: Turn the selected points into 6 to 7 scenes. HARD CONSTRAIN
 single scene's duration_s MUST be either exactly 5 or exactly 6 -- no other value is
 allowed (not 7, not 8, not 4). This matches what AI video generation models can natively
 produce in one call. Each scene needs:
-- narration: one short spoken sentence that fills most of the scene's duration at a natural
-  speaking pace (~2.5 words/sec) -- roughly 12-15 words for a 5-6 second scene. Conversational
-  tone, not written-essay style.
+- narration: a natural spoken sentence, slightly fuller/more descriptive than a bare
+  headline -- aim for a complete, flowing thought rather than the shortest possible
+  phrasing (e.g. prefer "We've all sat down to work and felt the pull to do anything else"
+  over "We all procrastinate"). Conversational tone, contractions welcome.
 - visual: a concrete, filmable description of what should be shown on screen (subject,
   action, setting -- specific enough to generate an image/short clip from)
 - duration_s: this scene's length in seconds (all scenes summed should total 30-40s)
@@ -519,7 +520,7 @@ def _generate_storyboard_llm(raw_content: str, source_type: str, url_kind: str |
     prompt = _build_storyboard_prompt(raw_content, source_type, url_kind)
 
     response = _groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b", # llama model got depreciated
         messages=[
             {
                 "role": "system",
@@ -658,8 +659,8 @@ import edge_tts # The text-to-speech library.
 import asyncio # The text-to-speech library is asynchronous, so we need Python's asyncio to run it.
 # Python's asynchronous programming framework.
 
-async def _generate_scene_audio_async(narration_text: str, output_path: Path) -> None:
-    communicator = edge_tts.Communicate(narration_text, voice="en-US-AriaNeural")
+async def _generate_scene_audio_async(narration_text: str, output_path: Path, rate: str = "+0%") -> None:
+    communicator = edge_tts.Communicate(narration_text, voice="en-US-AriaNeural", rate=rate)
     await communicator.save(str(output_path))
 
 # narration_text->This comes directly from your storyboard.
@@ -670,19 +671,20 @@ async def _generate_scene_audio_async(narration_text: str, output_path: Path) ->
 # await essentially means:
 # "Wait for this asynchronous operation to finish before continuing this async function."
 
-def _generate_scene_audio(narration_text: str, scene_id: int, run_id: str) -> str:
+def _generate_scene_audio(narration_text: str, scene_id: int, run_id: str, rate: str = "+0%") -> str:
     scene_dir = ASSETS_DIR / run_id
     scene_dir.mkdir(parents=True, exist_ok=True)
     audio_path = scene_dir / f"scene_{scene_id}.mp3"
 
-    asyncio.run(_generate_scene_audio_async(narration_text, audio_path))
+    asyncio.run(_generate_scene_audio_async(narration_text, audio_path, rate))
+
+    return str(audio_path)
     # asyncio.run() -> creates/runs the necessary event loop and waits until the async function completes.
 
     # ...this line, inside a normal, regular (non-async) function, is how you "bridge" into async code from ordinary code 
     # — asyncio.run()-> starts up what's needed to run an async function and waits for it to finish before continuing, so from the outside, 
     # _generate_scene_audio behaves like any normal function we can call from generate_assets just like everything else.
 
-    return str(audio_path)
 
 # call function
   #   ↓
@@ -779,95 +781,231 @@ def _apply_ken_burns(image_path: str, duration_s: float, output_path: str) -> st
 
 
 
-# ImageClip(image_path) —> moviepy loads a still image as a "clip" (a video made from one frame, repeated)
-
-# .with_duration(duration_s) —> sets how long this clip should play for (our real, measured audio duration from earlier — we'll wire that in shortly
-
-# .resized(lambda t: 1 + 0.04 * (t / duration_s)) — this is the actual Ken Burns motion. 
-# lambda t: ... defines a function of time t (moviepy calls this once per frame, feeding in the current timestamp). 
-# At t=0 (start), the scale factor is 1 + 0.04*(0) = 1.0 (normal size). At t=duration_s (end), it's 1 + 0.04*(1) = 1.04 (4% zoomed in). 
-# So across the whole clip, the image smoothly scales from 100% to 104% — a subtle, slow zoom, not jarring.
-
-# .write_videofile(..., fps=24, codec="libx264", audio=False) — renders the actual .mp4 file. 
-# fps=24 matches our PDF requirement. libx264 is a standard, widely-compatible video codec. 
-# audio=False because this clip has no sound of its own — narration audio gets layered on separately in the final assembly stage.
+CROSSFADE_S = 0.3    # overlap duration between consecutive scenes 
+                     # shortened from 0.5 -- longer overlaps looked like
+                     # "ghosting" when consecutive scenes have very
+                     # different visual content
 
 
-
-
-
-
-
-
-
-# the primary path — real AI video via Hugging Face
-
-from huggingface_hub import InferenceClient
-
-_hf_client = InferenceClient(provider="fal-ai", api_key=os.environ.get("HF_TOKEN"))
-
-
-def _generate_ai_video_clip(image_path: str, visual_description: str, output_path: str) -> str:
+def _compute_scene_timeline(scene_assets: list) -> list:
     """
-    Primary motion path: animates the scene's still image into a real
-    short AI-generated video clip using LTX-Video.
+    Given scene assets (each with actual_duration_s), computes the start
+    time of each scene in the final assembled video, accounting for
+    cross-fade overlaps eating into the naive cumulative sum.
     """
-    with open(image_path, "rb") as f:
-        image_bytes = f.read()
+    timeline = []
+    cursor = 0.0
+    for i, scene in enumerate(scene_assets):
+        start = cursor
+        duration = scene["actual_duration_s"]
+        timeline.append({"scene_id": scene["scene_id"], "start": start, "duration": duration})
+        overlap = CROSSFADE_S if i < len(scene_assets) - 1 else 0.0
+        cursor += duration - overlap
+    return timeline
 
-    video_bytes = _hf_client.image_to_video(
-        image_bytes,
-        prompt=visual_description,
-        model="Lightricks/LTX-Video",
+
+
+
+from moviepy import VideoFileClip, CompositeVideoClip, concatenate_videoclips
+from moviepy.video.fx import CrossFadeIn, CrossFadeOut
+
+
+def _concatenate_with_crossfades(scene_assets: list, output_path: str) -> float:
+    """
+    Stitches all scene motion clips into one continuous video with
+    cross-fade transitions between consecutive scenes.
+    Returns the final video's total duration.
+    """
+    clips = []
+    for i, scene in enumerate(scene_assets):
+        clip = VideoFileClip(scene["motion_path"])
+
+        if i > 0:
+            clip = clip.with_effects([CrossFadeIn(CROSSFADE_S)])
+        if i < len(scene_assets) - 1:
+            clip = clip.with_effects([CrossFadeOut(CROSSFADE_S)])
+
+        clips.append(clip)
+
+    final = concatenate_videoclips(clips, method="compose", padding=-CROSSFADE_S)
+    final.write_videofile(output_path, fps=24, codec="libx264", audio=False, logger=None)
+
+    total_duration = final.duration
+    for c in clips:
+        c.close()
+    final.close()
+
+    return total_duration
+
+
+
+
+
+MIN_SCENE_DURATION_S = 6.5  # keeps total video in the 30-40s range even if
+                             # narration audio comes out shorter than planned
+MAX_SCENE_DURATION_S = 6.75  # keeps 6-scene total under the 40s ceiling
+                              # even with fuller narration
+
+def _generate_assets_for_scene(scene, style_guide, run_id, scene_dir):
+    image_path = _generate_scene_image(scene["visual"], style_guide, scene["scene_id"], run_id)
+    audio_path = _generate_scene_audio(scene["narration"], scene["scene_id"], run_id)
+    real_duration = _get_audio_duration(audio_path)
+
+    video_duration = min(max(real_duration, MIN_SCENE_DURATION_S), MAX_SCENE_DURATION_S)
+
+    # If narration is longer than the scene's video window, regenerate the
+    # audio at a slightly faster speaking rate so it fits entirely within
+    # the scene -- narration must never bleed into the next scene's
+    # transition.
+    if real_duration > video_duration:
+        speedup_factor = real_duration / video_duration
+        rate_str = f"+{int((speedup_factor - 1) * 100)}%"
+        audio_path = _generate_scene_audio(scene["narration"], scene["scene_id"], run_id, rate=rate_str)
+        real_duration = _get_audio_duration(audio_path)
+
+    motion_path = str(scene_dir / f"scene_{scene['scene_id']}_motion.mp4")
+    _apply_ken_burns(image_path, video_duration, motion_path)
+
+    return {
+        "scene_id": scene["scene_id"],
+        "narration": scene["narration"],
+        "image_path": image_path,
+        "audio_path": audio_path,
+        "motion_path": motion_path,
+        "planned_duration_s": scene["duration_s"],
+        "actual_duration_s": round(video_duration, 2),
+        "narration_duration_s": round(real_duration, 2),
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Layering narration audio onto the assembled video
+
+from moviepy import AudioFileClip, CompositeAudioClip
+
+
+def _build_audio_track(scene_assets: list, timeline: list, total_duration: float) -> CompositeAudioClip:
+    """
+    Places each scene's narration audio at its correct start time in the
+    final timeline, so voice lines land under their matching visual scene.
+    """
+    audio_clips = []
+    for scene, t in zip(scene_assets, timeline):
+        audio = AudioFileClip(scene["audio_path"]).with_start(t["start"])
+        audio_clips.append(audio)
+
+    return CompositeAudioClip(audio_clips).with_duration(total_duration)
+
+
+
+
+
+
+
+
+
+
+
+
+
+from moviepy.video.fx import Resize
+from moviepy import CompositeVideoClip
+
+
+TARGET_W, TARGET_H = 1080, 1920
+
+
+def _resize_and_pad(clip):
+    """
+    Scales the clip to fit within 1080x1920 while preserving aspect ratio,
+    then pads with black bars to exactly fill the frame -- avoids distortion
+    (stretching) since our source images/video aren't natively 9:16.
+    """
+    scale = min(TARGET_W / clip.w, TARGET_H / clip.h)
+    resized = clip.with_effects([Resize(scale)])
+    return CompositeVideoClip(
+        [resized.with_position("center")],
+        size=(TARGET_W, TARGET_H),
     )
 
-    with open(output_path, "wb") as f:
-        f.write(video_bytes)
-
-    return output_path
 
 
 
-from orchestrator import task, logger
-# Combine both into one function with automatic fallback
 
-def _generate_scene_motion(
-    image_path: str, visual_description: str, duration_s: float,
-    scene_id: int, run_id: str,
-) -> dict:
-    """
-    Tries real AI video generation first. If it fails for any reason,
-    automatically falls back to Ken Burns on the still image, so one
-    flaky generation never fails the whole pipeline.
-    """
-    scene_dir = ASSETS_DIR / run_id
-    scene_dir.mkdir(parents=True, exist_ok=True)
-    video_path = str(scene_dir / f"scene_{scene_id}_motion.mp4")
 
-    try:
-        _generate_ai_video_clip(image_path, visual_description, video_path)
-        return {"motion_path": video_path, "motion_type": "ai_generated"}
-    except Exception as exc:
-        logger.warning(
-            "Scene %d: AI video generation failed (%s), falling back to Ken Burns",
-            scene_id, exc,
+
+
+
+
+
+
+def assemble_final_video(scene_assets: list, run_id: str) -> dict:
+    output_dir = CACHE_ROOT.parent / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    final_path = str(output_dir / f"final_{run_id}.mp4")
+    silent_path = str(output_dir / f"_silent_{run_id}.mp4")
+
+    timeline = _compute_scene_timeline(scene_assets)
+    total_duration = _concatenate_with_crossfades(scene_assets, silent_path)
+
+    audio_track = _build_audio_track(scene_assets, timeline, total_duration)
+    caption_clips = _build_caption_clips(scene_assets, timeline)
+
+    base_video = VideoFileClip(silent_path)
+    base_video = _resize_and_pad(base_video)  # <-- new: enforce 1080x1920 before captions
+
+    video = CompositeVideoClip([base_video, *caption_clips], size=(TARGET_W, TARGET_H)).with_audio(audio_track)
+
+    video.write_videofile(
+        final_path, fps=24, codec="libx264", audio_codec="aac", logger=None
+    )
+    video.close()
+    base_video.close()
+    audio_track.close()
+
+    return {"final_video_path": final_path, "duration_s": round(total_duration, 2)}
+
+
+
+
+
+
+
+from moviepy import TextClip
+
+
+def _build_caption_clips(scene_assets: list, timeline: list) -> list:
+    caption_clips = []
+    for scene, t in zip(scene_assets, timeline):
+        caption = (
+            TextClip(
+                text=scene["narration"],
+                font_size=40,  # down from 44 -- narration is now longer, smaller text
+                               # wraps more cleanly across 2 lines
+                color="white",
+                stroke_color="black",
+                stroke_width=2,
+                method="caption",
+                size=(int(TARGET_W * 0.85), None),
+                text_align="center",
+            )
+            .with_start(t["start"])
+            .with_duration(t["duration"])
+            .with_position(("center", 0.78), relative=True)
         )
-        _apply_ken_burns(image_path, duration_s, video_path)
-        return {"motion_path": video_path, "motion_type": "ken_burns_fallback"}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        caption_clips.append(caption)
+    return caption_clips
 
 
 
@@ -964,34 +1102,13 @@ def generate_assets(inputs: dict) -> dict:
     style_guide = inputs["storyboard"]["style_guide"]
     run_id = inputs["initial_input"].get("run_id", "default")
 
-   # Why this approach: 
-   # we're generating a short, stable ID from the input itself (same technique as our cache-hashing from Session 1) 
-   # — so the same input always produces the same run_id, and different inputs get different folders automatically, 
-   # with zero extra bookkeeping needed.
+    scene_dir = ASSETS_DIR / run_id
+    scene_dir.mkdir(parents=True, exist_ok=True)
 
-    scene_assets = []
-    for scene in scenes:
-        image_path = _generate_scene_image(
-            scene["visual"], style_guide, scene["scene_id"], run_id
-        )
-        audio_path = _generate_scene_audio(
-            scene["narration"], scene["scene_id"], run_id
-        )
-        real_duration = _get_audio_duration(audio_path)
-
-
-        # For every scene in the storyboard, we generate its real image, real audio, and measure the real duration 
-        # — three genuine artifacts per scene, not fakes.
-
-
-        scene_assets.append({
-            "scene_id": scene["scene_id"],
-            "narration": scene["narration"],
-            "image_path": image_path,
-            "audio_path": audio_path,
-            "planned_duration_s": scene["duration_s"],
-            "actual_duration_s": round(real_duration, 2),
-        })
+    scene_assets = [
+        _generate_assets_for_scene(scene, style_guide, run_id, scene_dir)
+        for scene in scenes
+    ]
 
     return {"scene_assets": scene_assets}
 
@@ -999,5 +1116,7 @@ def generate_assets(inputs: dict) -> dict:
 @task("assembly", cache_dir=CACHE_ROOT / "final")
 def assemble_video(inputs: dict) -> dict:
     scene_assets = inputs["assets"]["scene_assets"]
-    time.sleep(1)
-    return {"final_video_path": "[DUMMY]/final_video.mp4", "num_scenes": len(scene_assets)}
+    run_id = inputs["initial_input"].get("run_id", "default")
+
+    result = assemble_final_video(scene_assets, run_id)
+    return result
